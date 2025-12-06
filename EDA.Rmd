@@ -1,0 +1,689 @@
+---
+title: "Exploratory Data Analysis"
+author: "Yiming Cao"
+date: "2025-12-05"
+output:
+  html_document:
+    css: styles.css
+    includes:
+      before_body: navbar.html
+      after_body: code_toggle.html
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 10, fig.height = 6)
+```
+
+```{r load-packages}
+library(tidyverse)
+library(plotly)
+library(scales)
+library(viridis)
+library(GGally)
+library(corrplot)
+library(tidytext)
+library(maps)
+library(sf)
+```
+
+```{r load-data}
+# Load cleaned datasets
+bmw_clean <- read_csv("data/bmw_clean.csv")
+bmw_yearly <- read_csv("data/bmw_yearly_clean.csv")
+```
+
+## Data Overview
+
+Let's start by getting a sense of what we're working with.
+
+```{r data-summary}
+# Basic dimensions
+cat("Total observations:", nrow(bmw_clean), "\n")
+cat("Time period:", min(bmw_clean$year), "-", max(bmw_clean$year), "\n")
+cat("Number of regions:", n_distinct(bmw_clean$region), "\n")
+cat("Number of models:", n_distinct(bmw_clean$model), "\n")
+
+# Quick peek at structure
+glimpse(bmw_clean)
+```
+
+```{r region-summary}
+# Sales by region (total across all years)
+bmw_clean %>%
+  group_by(region) %>%
+  summarize(
+    total_sales = sum(sales_volume),
+    avg_price = mean(price_usd),
+    n_records = n()
+  ) %>%
+  arrange(desc(total_sales))
+```
+
+## 1. Sales Trends Over Time
+
+### Overall yearly trends
+
+```{r yearly-trend}
+# Aggregate global sales by year
+global_yearly <- bmw_clean %>%
+  group_by(year) %>%
+  summarize(total_sales = sum(sales_volume)) %>%
+  arrange(year)
+
+ggplot(global_yearly, aes(x = year, y = total_sales)) +
+  geom_line(size = 1.2, color = "#1f77b4") +
+  geom_point(size = 3, color = "#1f77b4") +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "BMW Global Sales by Year (2010-2024)",
+    x = "Year",
+    y = "Total Sales Volume"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+Interesting - there's quite a bit of fluctuation. The 2020 drop probably reflects COVID impact, but what about other dips?
+
+### Regional trends over time
+
+```{r regional-trends}
+regional_yearly <- bmw_clean %>%
+  group_by(region, year) %>%
+  summarize(total_sales = sum(sales_volume), .groups = "drop")
+
+p1 <- ggplot(regional_yearly, aes(x = year, y = total_sales, color = region)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  scale_y_continuous(labels = comma) +
+  scale_color_viridis_d() +
+  labs(
+    title = "BMW Sales by Region Over Time",
+    x = "Year",
+    y = "Sales Volume",
+    color = "Region"
+  ) +
+  theme_minimal()
+
+ggplotly(p1)
+```
+
+```{r growth-heatmap}
+# Growth rate heatmap
+growth_matrix <- bmw_yearly %>%
+  select(region, year, sales_growth_pct) %>%
+  pivot_wider(names_from = year, values_from = sales_growth_pct)
+
+# For visualization, convert back to long format
+growth_long <- bmw_yearly %>%
+  select(region, year, sales_growth_pct)
+
+ggplot(growth_long, aes(x = year, y = region, fill = sales_growth_pct)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "red", mid = "white", high = "darkgreen",
+    midpoint = 0,
+    labels = function(x) paste0(x, "%")
+  ) +
+  labs(
+    title = "Year-over-Year Sales Growth Rate by Region",
+    x = "Year",
+    y = "Region",
+    fill = "Growth %"
+  ) +
+  theme_minimal()
+```
+
+Some regions show really volatile patterns - Middle East and Africa especially. Asia seems more stable recently.
+
+## 2. Regional Comparison
+
+### Interactive Global Sales Map
+
+Let's create an interactive choropleth map where entire regions are colored by sales!
+
+```{r interactive-world-map, fig.width=12, fig.height=7}
+# Prepare data by year and region
+region_yearly_sales <- bmw_clean %>%
+  group_by(region, year) %>%
+  summarize(total_sales = sum(sales_volume), .groups = "drop")
+
+# Map countries to regions - comprehensive list with ISO-3 codes
+country_region_map <- data.frame(
+  country_code = c(
+    # Africa
+    "DZA", "AGO", "BEN", "BWA", "BFA", "BDI", "CMR", "CPV", "CAF", "TCD",
+    "COM", "COD", "COG", "CIV", "DJI", "EGY", "GNQ", "ERI", "ETH", "GAB",
+    "GMB", "GHA", "GIN", "GNB", "KEN", "LSO", "LBR", "LBY", "MDG", "MWI",
+    "MLI", "MRT", "MUS", "MAR", "MOZ", "NAM", "NER", "NGA", "RWA", "STP",
+    "SEN", "SYC", "SLE", "SOM", "ZAF", "SSD", "SDN", "SWZ", "TZA", "TGO",
+    "TUN", "UGA", "ZMB", "ZWE",
+    # Asia
+    "AFG", "ARM", "AZE", "BHR", "BGD", "BTN", "BRN", "KHM", "CHN", "GEO",
+    "IND", "IDN", "IRN", "IRQ", "ISR", "JPN", "JOR", "KAZ", "KWT", "KGZ",
+    "LAO", "LBN", "MYS", "MDV", "MNG", "MMR", "NPL", "PRK", "OMN", "PAK",
+    "PSE", "PHL", "QAT", "SAU", "SGP", "KOR", "LKA", "SYR", "TWN", "TJK",
+    "THA", "TLS", "TUR", "TKM", "ARE", "UZB", "VNM", "YEM",
+    # Europe
+    "ALB", "AND", "AUT", "BLR", "BEL", "BIH", "BGR", "HRV", "CYP", "CZE",
+    "DNK", "EST", "FIN", "FRA", "DEU", "GRC", "HUN", "ISL", "IRL", "ITA",
+    "XKX", "LVA", "LIE", "LTU", "LUX", "MKD", "MLT", "MDA", "MCO", "MNE",
+    "NLD", "NOR", "POL", "PRT", "ROU", "RUS", "SMR", "SRB", "SVK", "SVN",
+    "ESP", "SWE", "CHE", "UKR", "GBR", "VAT",
+    # North America
+    "CAN", "USA", "MEX",
+    # South America
+    "ARG", "BOL", "BRA", "CHL", "COL", "ECU", "GUY", "PRY", "PER", "SUR",
+    "URY", "VEN"
+  ),
+  region = c(
+    # Africa - 54 countries
+    rep("Africa", 54),
+    # Asia - 48 countries
+    rep("Asia", 48),
+    # Europe - 46 countries
+    rep("Europe", 46),
+    # North America - 3 countries
+    rep("North America", 3),
+    # South America - 12 countries
+    rep("South America", 12)
+  )
+)
+
+# Create data for all countries across all years
+map_data_full <- expand.grid(
+  country_code = country_region_map$country_code,
+  year = unique(region_yearly_sales$year)
+) %>%
+  left_join(country_region_map, by = "country_code") %>%
+  left_join(region_yearly_sales, by = c("region", "year"))
+
+# Create choropleth map with animation
+fig <- plot_geo(map_data_full, locationmode = 'ISO-3') %>%
+  add_trace(
+    type = 'choropleth',
+    locations = ~country_code,
+    z = ~total_sales,
+    frame = ~year,
+    color = ~total_sales,
+    colors = viridis(10),
+    text = ~paste("<b>Region:", region, "</b><br>",
+                  "Year:", year, "<br>",
+                  "Sales:", format(total_sales, big.mark = ",")),
+    hovertemplate = "%{text}<extra></extra>",
+    colorbar = list(
+      title = "Sales Volume",
+      tickformat = ","
+    )
+  ) %>%
+  layout(
+    title = list(
+      text = "BMW Global Sales by Region (2010-2024)<br><sub>Click play or drag slider to animate | Hover for details | Scroll to zoom</sub>",
+      font = list(size = 16)
+    ),
+    geo = list(
+      projection = list(type = 'natural earth'),
+      showland = TRUE,
+      landcolor = toRGB("gray95"),
+      coastlinecolor = toRGB("white"),
+      showocean = TRUE,
+      oceancolor = toRGB("aliceblue")
+    )
+  ) %>%
+  animation_opts(
+    frame = 1000,
+    transition = 500,
+    redraw = FALSE
+  ) %>%
+  animation_slider(
+    currentvalue = list(
+      prefix = "Year: ",
+      font = list(size = 20, color = "black")
+    )
+  ) %>%
+  config(scrollZoom = TRUE)
+
+fig
+```
+
+This interactive choropleth map shows:
+- **Region colors**: Entire regions (all countries in Africa, Asia, etc.) are filled with colors
+- **Color scale**: Purple (low sales) to yellow (high sales)
+- **Animation**: Click play button or drag slider to see changes from 2010-2024
+- **Hover**: Move mouse over any country to see the region name and sales data
+- **Zoom/Pan**: Scroll to zoom, click and drag to move around the map
+
+### Sales distribution by region
+
+```{r regional-sales-dist}
+# Prepare regional sales data
+region_totals <- bmw_clean %>%
+  group_by(region) %>%
+  summarize(total_sales = sum(sales_volume)) %>%
+  arrange(desc(total_sales))
+
+ggplot(region_totals, aes(x = reorder(region, total_sales), y = total_sales, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_y_continuous(labels = comma) +
+  scale_fill_viridis_d() +
+  labs(
+    title = "Total BMW Sales by Region (2010-2024)",
+    x = "",
+    y = "Total Sales Volume"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+### Average prices across regions
+
+```{r price-by-region}
+ggplot(bmw_clean, aes(x = region, y = price_usd, fill = region)) +
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_continuous(labels = dollar) +
+  scale_fill_viridis_d() +
+  labs(
+    title = "BMW Price Distribution by Region",
+    x = "Region",
+    y = "Price (USD)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Price ranges are pretty similar across regions actually - wasn't expecting that. Maybe BMW keeps pricing consistent globally?
+
+### Comparing North America vs Asia
+
+Since our original motivation was comparing US and China markets, let's look closer at North America vs Asia.
+
+```{r us-china-comparison}
+na_asia <- bmw_clean %>%
+  filter(region %in% c("North America", "Asia"))
+
+# Sales volume comparison
+p2 <- na_asia %>%
+  group_by(region, year) %>%
+  summarize(total_sales = sum(sales_volume), .groups = "drop") %>%
+  ggplot(aes(x = year, y = total_sales, color = region)) +
+  geom_line(size = 1.5) +
+  geom_point(size = 3) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "North America vs Asia: Sales Volume",
+    x = "Year",
+    y = "Sales Volume"
+  ) +
+  theme_minimal()
+
+ggplotly(p2)
+```
+
+```{r na-asia-price}
+# Price comparison
+na_asia %>%
+  ggplot(aes(x = year, y = price_usd, color = region)) +
+  geom_smooth(method = "loess", size = 1.5, se = TRUE) +
+  scale_y_continuous(labels = dollar) +
+  labs(
+    title = "Average Price Trends: North America vs Asia",
+    x = "Year",
+    y = "Average Price (USD)"
+  ) +
+  theme_minimal()
+```
+
+## 3. Model Analysis
+
+### Most popular models globally
+
+```{r top-models}
+model_sales <- bmw_clean %>%
+  group_by(model) %>%
+  summarize(
+    total_sales = sum(sales_volume),
+    avg_price = mean(price_usd),
+    n_transactions = n()
+  ) %>%
+  arrange(desc(total_sales))
+
+# Top 10 models
+top10_models <- model_sales %>%
+  head(10)
+
+ggplot(top10_models, aes(x = reorder(model, total_sales), y = total_sales)) +
+  geom_col(fill = "#2C7FB8", width = 0.7) +
+  coord_flip() +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Top 10 BMW Models by Total Sales (2010-2024)",
+    x = "Model",
+    y = "Total Sales Volume"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+X5 and 3 Series dominate - makes sense, these are their bread and butter models.
+
+### Model preferences by region
+
+```{r model-by-region}
+# Top 3 models per region
+top_models_region <- bmw_clean %>%
+  group_by(region, model) %>%
+  summarize(total_sales = sum(sales_volume), .groups = "drop") %>%
+  group_by(region) %>%
+  slice_max(total_sales, n = 5) %>%
+  arrange(region, desc(total_sales))
+
+ggplot(top_models_region, aes(x = reorder_within(model, total_sales, region),
+                                y = total_sales, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_x_reordered() +
+  scale_y_continuous(labels = comma) +
+  scale_fill_viridis_d() +
+  facet_wrap(~region, scales = "free_y") +
+  labs(
+    title = "Top 5 Models by Region",
+    x = "",
+    y = "Sales Volume"
+  ) +
+  theme_minimal()
+```
+
+### Price vs Sales relationship
+
+```{r price-sales-scatter}
+model_summary <- bmw_clean %>%
+  group_by(model) %>%
+  summarize(
+    total_sales = sum(sales_volume),
+    avg_price = mean(price_usd)
+  )
+
+ggplot(model_summary, aes(x = avg_price, y = total_sales, label = model)) +
+  geom_point(size = 3, alpha = 0.6, color = "#1f77b4") +
+  geom_smooth(method = "lm", se = TRUE, color = "red", linetype = "dashed") +
+  scale_x_continuous(labels = dollar) +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Model Price vs Sales Volume",
+    x = "Average Price (USD)",
+    y = "Total Sales"
+  ) +
+  theme_minimal()
+```
+
+No clear negative correlation - expensive models still sell well. BMW's premium positioning probably matters more than price sensitivity.
+
+## 4. Fuel Type Evolution
+
+### Fuel type distribution over time
+
+```{r fuel-trends}
+fuel_yearly <- bmw_clean %>%
+  group_by(year, fuel_type) %>%
+  summarize(total_sales = sum(sales_volume), .groups = "drop")
+
+# Stacked area chart
+ggplot(fuel_yearly, aes(x = year, y = total_sales, fill = fuel_type)) +
+  geom_area(alpha = 0.8) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "BMW Sales by Fuel Type Over Time",
+    x = "Year",
+    y = "Sales Volume",
+    fill = "Fuel Type"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+```{r fuel-proportion}
+# Proportion over time
+fuel_prop <- fuel_yearly %>%
+  group_by(year) %>%
+  mutate(proportion = total_sales / sum(total_sales))
+
+ggplot(fuel_prop, aes(x = year, y = proportion, fill = fuel_type)) +
+  geom_area(alpha = 0.8) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Fuel Type Market Share Evolution",
+    x = "Year",
+    y = "Proportion of Sales",
+    fill = "Fuel Type"
+  ) +
+  theme_minimal()
+```
+
+Electric vehicles are growing but not as dramatically as I expected - still a small share by 2024.
+
+### Fuel preferences by region
+
+```{r fuel-by-region}
+fuel_region <- bmw_clean %>%
+  group_by(region, fuel_type) %>%
+  summarize(total_sales = sum(sales_volume), .groups = "drop") %>%
+  group_by(region) %>%
+  mutate(proportion = total_sales / sum(total_sales))
+
+ggplot(fuel_region, aes(x = region, y = proportion, fill = fuel_type)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Fuel Type Preferences by Region",
+    x = "Region",
+    y = "Proportion of Sales",
+    fill = "Fuel Type"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Different regions show different fuel preferences - Europe has more diesel, which tracks with what we know about European car markets.
+
+## 5. Transmission Analysis
+
+```{r transmission-dist}
+trans_summary <- bmw_clean %>%
+  group_by(transmission) %>%
+  summarize(
+    total_sales = sum(sales_volume),
+    avg_price = mean(price_usd)
+  )
+
+trans_summary
+```
+
+```{r transmission-by-region}
+trans_region <- bmw_clean %>%
+  group_by(region, transmission) %>%
+  summarize(total_sales = sum(sales_volume), .groups = "drop") %>%
+  group_by(region) %>%
+  mutate(proportion = total_sales / sum(total_sales))
+
+ggplot(trans_region, aes(x = region, y = proportion, fill = transmission)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = percent) +
+  labs(
+    title = "Manual vs Automatic Transmission by Region",
+    x = "Region",
+    y = "Proportion of Sales",
+    fill = "Transmission"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Pretty balanced between manual and automatic - varies by region but not as extreme as I thought.
+
+## 6. Sales Classification Analysis
+
+```{r sales-class-dist}
+bmw_clean %>%
+  count(sales_classification) %>%
+  mutate(proportion = n / sum(n)) %>%
+  ggplot(aes(x = sales_classification, y = n, fill = sales_classification)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_manual(values = c("Low" = "#d73027", "Medium" = "#fee08b", "High" = "#1a9850")) +
+  labs(
+    title = "Distribution of Sales Classification",
+    x = "Sales Classification",
+    y = "Number of Records"
+  ) +
+  theme_minimal()
+```
+
+```{r high-sales-analysis}
+# What characteristics are associated with high sales?
+bmw_clean %>%
+  group_by(sales_classification, fuel_type) %>%
+  summarize(count = n(), .groups = "drop") %>%
+  ggplot(aes(x = fuel_type, y = count, fill = sales_classification)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("Low" = "#d73027", "Medium" = "#fee08b", "High" = "#1a9850")) +
+  labs(
+    title = "Sales Classification by Fuel Type",
+    x = "Fuel Type",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+## 7. Correlation Analysis
+
+```{r correlation-numeric}
+# Select numeric variables for correlation
+numeric_vars <- bmw_clean %>%
+  select(year, engine_size_l, mileage_km, price_usd, sales_volume) %>%
+  drop_na()
+
+# Correlation matrix
+cor_matrix <- cor(numeric_vars)
+print(cor_matrix)
+```
+
+```{r correlation-viz, fig.width=10, fig.height=10}
+# Pairs plot for key variables
+ggpairs(
+  numeric_vars,
+  title = "Correlations Between Key Variables",
+  lower = list(continuous = wrap("points", alpha = 0.3, size = 0.5))
+)
+```
+
+## 8. Some Specific Questions
+
+### Q1: Did COVID-19 (2020) really impact sales?
+
+```{r covid-impact}
+covid_analysis <- bmw_yearly %>%
+  filter(year %in% c(2019, 2020, 2021)) %>%
+  select(region, year, total_sales) %>%
+  pivot_wider(names_from = year, values_from = total_sales, names_prefix = "year_") %>%
+  mutate(
+    drop_2020 = year_2020 - year_2019,
+    recovery_2021 = year_2021 - year_2020,
+    pct_drop = (drop_2020 / year_2019) * 100,
+    pct_recovery = (recovery_2021 / year_2020) * 100
+  )
+
+covid_analysis
+```
+
+```{r covid-viz}
+covid_long <- bmw_yearly %>%
+  filter(year %in% c(2019, 2020, 2021)) %>%
+  select(region, year, total_sales)
+
+ggplot(covid_long, aes(x = factor(year), y = total_sales, group = region, color = region)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  scale_y_continuous(labels = comma) +
+  scale_color_viridis_d() +
+  labs(
+    title = "Sales Around COVID-19 Period (2019-2021)",
+    x = "Year",
+    y = "Total Sales",
+    color = "Region"
+  ) +
+  theme_minimal()
+```
+
+Impact varied by region - some regions dropped more than others, and recovery patterns differ too.
+
+### Q2: Are newer models more expensive?
+
+```{r price-evolution}
+price_by_year <- bmw_clean %>%
+  group_by(year) %>%
+  summarize(
+    avg_price = mean(price_usd),
+    median_price = median(price_usd),
+    sd_price = sd(price_usd)
+  )
+
+ggplot(price_by_year, aes(x = year)) +
+  geom_line(aes(y = avg_price, color = "Average"), size = 1.2) +
+  geom_line(aes(y = median_price, color = "Median"), size = 1.2) +
+  geom_ribbon(aes(ymin = avg_price - sd_price, ymax = avg_price + sd_price),
+              alpha = 0.2) +
+  scale_y_continuous(labels = dollar) +
+  scale_color_manual(values = c("Average" = "blue", "Median" = "red")) +
+  labs(
+    title = "BMW Price Evolution Over Time",
+    x = "Year",
+    y = "Price (USD)",
+    color = "Metric"
+  ) +
+  theme_minimal()
+```
+
+Prices actually fluctuate - not a clear upward trend. Probably reflects model mix changes more than inflation.
+
+### Q3: Which region has the most diverse model portfolio?
+
+```{r model-diversity}
+model_diversity <- bmw_clean %>%
+  group_by(region) %>%
+  summarize(
+    n_models = n_distinct(model),
+    n_transactions = n(),
+    models_per_transaction = n_distinct(model) / n()
+  ) %>%
+  arrange(desc(n_models))
+
+model_diversity
+
+ggplot(model_diversity, aes(x = reorder(region, n_models), y = n_models, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_viridis_d() +
+  labs(
+    title = "Model Diversity by Region",
+    x = "Region",
+    y = "Number of Distinct Models Sold"
+  ) +
+  theme_minimal()
+```
+
+## Summary of Key Findings
+
+1. **Sales are volatile** - significant year-to-year fluctuations, not a smooth growth trajectory
+2. **Regional differences exist but aren't extreme** - all regions show similar patterns, though timing varies
+3. **SUVs dominate** - X5 and X3 are consistently top sellers across regions
+4. **Fuel transition is gradual** - electric/hybrid growth is happening but slower than expected
+5. **COVID impact was real but temporary** - 2020 dip visible, but most regions recovered by 2021
+6. **Price isn't strongly correlated with sales** - premium positioning matters more than price point
+7. **Manual vs automatic is region-dependent** - not a clear global preference
+
+What surprised me:
+- Price consistency across regions - thought there'd be bigger differences
+- Electric adoption is slower than media coverage would suggest
+- Some regions (Middle East, Africa) show much more volatility than others
