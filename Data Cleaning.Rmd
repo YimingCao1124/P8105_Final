@@ -9,7 +9,7 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## Data Cleaning
+
 ```{r}
 
 library(tidyverse)
